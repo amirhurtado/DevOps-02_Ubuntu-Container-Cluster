@@ -9,6 +9,8 @@ Cluster de 3 nodos Ubuntu **dockerizados**, conectados por SSH, para practicar a
 ```
 devops-02 Ubuntu Container Cluster/
 ├── Dockerfile
+├── docker-compose.yaml
+├── shared/                 # volumen compartido entre los 3 nodos
 ├── ssh_keys/
 │   ├── hpckey
 │   └── hpckey.pub
@@ -92,6 +94,97 @@ RUN printf "Host *\n\tStrictHostKeyChecking no\n\tUserKnownHostsFile=/dev/null\n
 - Se copian las claves (`hpckey`, `hpckey.pub`) generadas localmente.
 - La pública se agrega a `authorized_keys` → cada nodo confía en quien tenga `hpckey`.
 - El `config` desactiva la verificación de `known_hosts` para que los nodos se conecten entre sí sin preguntar.
+
+## docker-compose.yaml
+
+Levanta los **3 nodos** del cluster (`node1`, `node2`, `node3`) a partir de la imagen construida desde el `Dockerfile`. Cada nodo tiene su **IP fija** dentro de una red bridge y comparte un volumen para intercambiar archivos.
+
+```yaml
+services:
+  node1:
+    build: .
+    image: mpi-node:latest
+    container_name: node1
+    networks:
+      my-red:
+        ipv4_address: 172.20.0.11
+    volumes:
+      - ./shared:/mnt/cluster
+
+  node2:
+    image: mpi-node:latest
+    container_name: node2
+    networks:
+      my-red:
+        ipv4_address: 172.20.0.12
+    volumes:
+      - ./shared:/mnt/cluster
+
+  node3:
+    image: mpi-node:latest
+    container_name: node3
+    networks:
+      my-red:
+        ipv4_address: 172.20.0.13
+    volumes:
+      - ./shared:/mnt/cluster
+
+networks:
+  my-red:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+```
+
+### Servicios
+
+| Servicio | Imagen            | IP fija         | Notas                                       |
+| -------- | ----------------- | --------------- | ------------------------------------------- |
+| `node1`  | `mpi-node:latest` | `172.20.0.11`   | **`build: .`** → construye la imagen aquí   |
+| `node2`  | `mpi-node:latest` | `172.20.0.12`   | Reutiliza la imagen ya construida           |
+| `node3`  | `mpi-node:latest` | `172.20.0.13`   | Reutiliza la imagen ya construida           |
+
+- **`build: .`** solo en `node1` → la imagen `mpi-node:latest` se construye una vez; los otros nodos la reutilizan.
+- **`container_name`** → fija el nombre del contenedor (útil para `docker exec -it node1 bash`).
+
+### Red — `my-red`
+
+```yaml
+networks:
+  my-red:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+```
+
+- **`driver: bridge`** → red interna aislada para los contenedores del proyecto.
+- **`subnet: 172.20.0.0/16`** → rango de IPs disponible.
+- Cada nodo recibe una **IP fija** (`ipv4_address`) para poder referenciarse entre sí (ej. `ssh mpiuser@172.20.0.12`).
+
+### Volumen compartido
+
+```yaml
+volumes:
+  - ./shared:/mnt/cluster
+```
+
+- Monta la carpeta local `./shared` dentro de cada contenedor en `/mnt/cluster`.
+- Los **3 nodos ven el mismo directorio**, lo que permite compartir programas MPI, datasets y resultados sin copiarlos por SSH.
+
+### Comandos útiles
+
+```bash
+# Construir y levantar los 3 nodos
+docker compose up -d
+
+# Entrar a un nodo
+docker exec -it node1 bash
+
+# Detener y eliminar todo
+docker compose down
+```
 
 ## Referencia general
 
