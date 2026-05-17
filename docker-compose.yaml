@@ -1,0 +1,34 @@
+services:
+  node1:
+    build: .
+    image: mpi-node:latest
+    container_name: node1
+    networks:                   
+      my-red:
+        ipv4_address: 172.20.0.11
+    volumes:                   
+      - ./shared:/mnt/cluster
+  node2:
+    image: mpi-node:latest
+    container_name: node2
+    networks:
+      my-red:
+        ipv4_address: 172.20.0.12
+    volumes:
+      - ./shared:/mnt/cluster
+    
+  node3:
+    image: mpi-node:latest
+    container_name: node3
+    networks:
+      my-red:
+        ipv4_address: 172.20.0.13
+    volumes:
+      - ./shared:/mnt/cluster
+          
+networks:
+  my-red:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
