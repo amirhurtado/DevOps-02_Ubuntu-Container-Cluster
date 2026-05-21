@@ -258,26 +258,51 @@ networks:
 
 ### Almacenamiento compartido vía NFS
 
-A diferencia de un bind mount al host, aquí los datos viven **dentro del contenedor `node1`** en `/mnt/cluster`. `node1` exporta esa ruta y los demás nodos la montan por red:
+A diferencia de un bind mount al host, aquí los datos viven en un **named volume Docker (`nfs-data`)** montado solo en `node1` sobre `/mnt/cluster`. `node1` exporta esa ruta por NFS y los demás nodos la montan por red:
 
 ```
 host
 └── (sin carpeta compartida en el host)
 
-node1  ── /mnt/cluster (real, exportado por NFS)
-            ▲
-            │  NFSv4
-            │
-node2  ── /mnt/cluster (montado del server)
-node3  ── /mnt/cluster (montado del server)
+nfs-data (volumen Docker, ext4 en la VM)
+    │
+    └─→ node1  ── /mnt/cluster (real, exportado por NFS)
+                    ▲
+                    │  NFSv4
+                    │
+        node2  ── /mnt/cluster (montado del server)
+        node3  ── /mnt/cluster (montado del server)
 ```
+
+### Ubicación dentro del contenedor
+
+`/mnt/cluster` está en la **raíz del filesystem**, no dentro del home del usuario. Al entrar al contenedor con `docker exec -it node1 bash`, caes en `/home/mpiuser` (`~`), y desde ahí **no verás** la carpeta haciendo `ls`. Para acceder:
+
+```bash
+ls -la /mnt/cluster      # ruta absoluta
+cd /mnt/cluster          # o cambiarte ahí directamente
+```
+
+Layout del filesystem dentro de cada nodo:
+
+```
+/
+├── home/
+│   └── mpiuser/         ← home del usuario (~), aquí caes al entrar
+│       ├── .bashrc
+│       └── .ssh/
+└── mnt/
+    └── cluster/         ← montaje NFS compartido entre los 3 nodos
+```
+
+### Notas
 
 - Los **3 nodos ven la misma ruta** `/mnt/cluster`, así que `mpirun` puede asumir que el binario y los datasets existen igual en cada uno.
 - Para meter archivos al cluster desde el host, se usan `docker cp` o `scp` contra `node1`:
   ```bash
   docker cp matmul.c node1:/mnt/cluster/
   ```
-- Si tumbas el cluster con `docker compose down`, los datos en `/mnt/cluster` se **pierden** (viven en el filesystem de `node1`, no en un volumen persistente). Para conservarlos, copia antes con `docker cp node1:/mnt/cluster ./backup`.
+- Como `/mnt/cluster` está respaldado por el volumen `nfs-data`, los datos **sobreviven** a `docker compose down`. Para borrarlos también, usa `docker compose down -v`.
 
 ### Comandos útiles
 
@@ -290,7 +315,7 @@ docker exec -it node1 bash
 
 # Verificar que el NFS está montado en los clientes
 docker exec node2 mount | grep cluster
-# → 172.30.0.11:/mnt/cluster on /mnt/cluster type nfs4 ...
+# → 172.30.0.11:/ on /mnt/cluster type nfs4 ...
 
 # Probar la sincronización: escribe en node1, lee desde node3
 docker exec node1 bash -c "echo hola > /mnt/cluster/test.txt"
