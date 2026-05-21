@@ -36,8 +36,9 @@ COPY --chown=mpiuser:mpiuser ssh_keys/hpckey /home/mpiuser/.ssh/hpckey
 COPY --chown=mpiuser:mpiuser ssh_keys/hpckey.pub /home/mpiuser/.ssh/hpckey.pub
 COPY --chown=mpiuser:mpiuser ssh_keys/hpckey.pub /home/mpiuser/.ssh/authorized_keys
 
-RUN printf "Host *\n\tStrictHostKeyChecking no\n\tUserKnownHostsFile=/dev/null\n" > /home/mpiuser/.ssh/config \
-    && chmod u=rw,go= /home/mpiuser/.ssh/config
+RUN printf "Host *\n\tStrictHostKeyChecking no\n\tUserKnownHostsFile=/dev/null\n\tIdentityFile ~/.ssh/hpckey\n" > /home/mpiuser/.ssh/config \
+    && chmod u=rw,go= /home/mpiuser/.ssh/config \
+    && chmod u=rw,go= /home/mpiuser/.ssh/hpckey
 
 USER root
 EXPOSE 22 2049 111

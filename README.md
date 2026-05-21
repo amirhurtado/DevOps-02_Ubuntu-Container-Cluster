@@ -337,12 +337,29 @@ docker compose down
 
 ### Archivos MPI (carpeta `mpi/`)
 
-| Archivo         | Qué hace                                                                                          |
-| --------------- | ------------------------------------------------------------------------------------------------- |
-| `mpi/mul.c`     | Programa de multiplicación de matrices. Recibe el tamaño `n` y devuelve `n tiempo`.               |
-| `mpi/script.sh` | Ejecuta `./mul` 10 veces sobre 9 tamaños distintos y guarda los tiempos en `times2.txt`.          |
+| Archivo         | Qué hace                                                                                                                                       |
+| --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `mpi/mul.c`     | Multiplicación de matrices distribuida con MPI (`MPI_Bcast` + `MPI_Scatterv` + `MPI_Gatherv`). Recibe `n` y devuelve `n tiempo`.                |
+| `mpi/script.sh` | Ejecuta `mpirun --map-by node -np 3` sobre 9 tamaños, 10 repeticiones cada uno, y guarda los tiempos en `times2.txt`.                          |
+| `mpi/hostfile`  | Lista de nodos con sus slots para `mpirun` (`node1 slots=4`, `node2 slots=4`, `node3 slots=4`).                                                |
 
-El `Dockerfile` copia `mpi/` a `/opt/mpi/` dentro de la imagen y `entrypoint.sh` (solo en `node1`) los pone en `/mnt/cluster/` compilando `mul.c` con `gcc -Ofast`. Como `/mnt/cluster` es NFS, los 3 nodos ven el binario sin copiar nada.
+El `Dockerfile` copia `mpi/` a `/opt/mpi/` dentro de la imagen y `entrypoint.sh` (solo en `node1`) los pone en `/mnt/cluster/` compilando `mul.c` con `mpicc -Ofast`. Como `/mnt/cluster` es NFS, los 3 nodos ven el binario sin copiar nada.
+
+### Cómo distribuye el trabajo MPI
+
+1. **Rank 0** (en `node1`) genera `A` y `B` con `srand(42)` (semilla fija → reproducible).
+2. `MPI_Bcast(B)` → los 3 ranks tienen `B` completa.
+3. `MPI_Scatterv(A)` → cada rank recibe sus filas de `A` (Scatterv permite que `n` no sea divisible por número de procesos).
+4. Cada rank calcula sus filas de `C = A_local * B`.
+5. `MPI_Gatherv(C)` → rank 0 recolecta `C` completa.
+6. `MPI_Wtime()` mide tiempo total alrededor de `Bcast + Scatterv + cómputo + Gatherv`.
+
+Variables del script (override con env vars):
+
+```bash
+NP=6 ./script.sh          # 6 procesos (2 por nodo)
+NP=3 OUT=/mnt/cluster/run1.txt ./script.sh
+```
 
 ## Referencia general
 
