@@ -10,7 +10,7 @@ Cluster de 3 nodos Ubuntu **dockerizados**, conectados por SSH, para practicar a
 devops-02 Ubuntu Container Cluster/
 ├── Dockerfile
 ├── docker-compose.yaml
-├── shared/                 # volumen compartido entre los 3 nodos
+├── entrypoint.sh           # arranca cada nodo según su rol (NFS server o client)
 ├── ssh_keys/
 │   ├── hpckey
 │   └── hpckey.pub
@@ -39,16 +39,20 @@ RUN apt-get update && apt-get install -y \
     gcc make \
     net-tools iputils-ping \
     sudo nano \
+    nfs-kernel-server nfs-common rpcbind \
  && rm -rf /var/lib/apt/lists/*
 ```
 
-| Paquete                                  | Para qué sirve                          |
-| ---------------------------------------- | --------------------------------------- |
-| `openssh-server`                         | Servidor SSH (login remoto entre nodos) |
-| `openmpi-bin`, `openmpi-common`, `libopenmpi-dev` | Cómputo paralelo con MPI       |
-| `gcc`, `make`                            | Compilar programas MPI en C             |
-| `net-tools`, `iputils-ping`              | Diagnóstico de red                      |
-| `sudo`, `nano`                           | Administración y edición                |
+| Paquete                                          | Para qué sirve                                                        |
+| ------------------------------------------------ | --------------------------------------------------------------------- |
+| `openssh-server`                                 | Servidor SSH (login remoto entre nodos)                               |
+| `openmpi-bin`, `openmpi-common`, `libopenmpi-dev`| Cómputo paralelo con MPI                                              |
+| `gcc`, `make`                                    | Compilar programas MPI en C                                           |
+| `net-tools`, `iputils-ping`                      | Diagnóstico de red                                                    |
+| `sudo`, `nano`                                   | Administración y edición                                              |
+| `nfs-kernel-server`                              | Demonio del servidor NFS (lo usa **node1** para exportar la carpeta)  |
+| `nfs-common`                                     | Cliente NFS + utilidades (`mount.nfs`, `rpcinfo`, etc.)               |
+| `rpcbind`                                        | Mapeador de puertos RPC requerido por NFS                             |
 
 ### Endurecimiento SSH
 
@@ -95,9 +99,70 @@ RUN printf "Host *\n\tStrictHostKeyChecking no\n\tUserKnownHostsFile=/dev/null\n
 - La pública se agrega a `authorized_keys` → cada nodo confía en quien tenga `hpckey`.
 - El `config` desactiva la verificación de `known_hosts` para que los nodos se conecten entre sí sin preguntar.
 
+### Entrypoint
+
+```dockerfile
+USER root
+EXPOSE 22 2049 111
+
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+```
+
+- Se exponen los puertos **22** (SSH), **2049** (NFS) y **111** (rpcbind).
+- En vez de un `CMD` fijo con `sshd`, el contenedor arranca con **`entrypoint.sh`**, que decide su comportamiento según la variable de entorno `NODE_ROLE` (ver sección [`entrypoint.sh`](#entrypointsh)).
+
+## entrypoint.sh
+
+Un único script que se comparte entre los 3 nodos. Lo que ejecuta depende de `NODE_ROLE`:
+
+- **`NODE_ROLE=server`** → arranca el servidor NFS (configura `/etc/exports`, levanta `rpcbind` y `nfs-kernel-server`, ejecuta `exportfs -ra`).
+- **`NODE_ROLE=client`** → espera a que el puerto 2049 del `$NFS_SERVER` responda y monta `172.20.0.11:/mnt/cluster` en `/mnt/cluster` vía NFSv4.
+- Al final, **todos** los nodos arrancan `sshd -D` en foreground (para que el contenedor no se cierre).
+
+```bash
+#!/bin/bash
+set -e
+
+mkdir -p /mnt/cluster
+chown mpiuser:mpiuser /mnt/cluster
+
+if [ "$NODE_ROLE" = "server" ]; then
+    echo "/mnt/cluster 172.20.0.0/16(rw,sync,no_subtree_check,no_root_squash)" > /etc/exports
+    service rpcbind start
+    service nfs-kernel-server start
+    exportfs -ra
+
+elif [ "$NODE_ROLE" = "client" ]; then
+    for i in $(seq 1 30); do
+        if timeout 1 bash -c "</dev/tcp/$NFS_SERVER/2049" 2>/dev/null; then
+            break
+        fi
+        sleep 2
+    done
+    mount -t nfs4 "$NFS_SERVER:/mnt/cluster" /mnt/cluster
+fi
+
+exec /usr/sbin/sshd -D
+```
+
+### Opciones de `/etc/exports`
+
+`/mnt/cluster 172.20.0.0/16(rw,sync,no_subtree_check,no_root_squash)`
+
+| Opción              | Significado                                                                     |
+| ------------------- | ------------------------------------------------------------------------------- |
+| `172.20.0.0/16`     | Solo clientes de la subred del cluster pueden montar                            |
+| `rw`                | Lectura y escritura                                                             |
+| `sync`              | Escrituras confirmadas en disco antes de responder (más lento pero seguro)      |
+| `no_subtree_check`  | Desactiva la verificación de subárbol (mejor rendimiento y robustez)            |
+| `no_root_squash`    | El `root` del cliente se trata como `root` real (necesario para `mpirun` y SSH) |
+
 ## docker-compose.yaml
 
-Levanta los **3 nodos** del cluster (`node1`, `node2`, `node3`) a partir de la imagen construida desde el `Dockerfile`. Cada nodo tiene su **IP fija** dentro de una red bridge y comparte un volumen para intercambiar archivos.
+Levanta los **3 nodos** del cluster (`node1`, `node2`, `node3`) a partir de la imagen construida desde el `Dockerfile`. Cada nodo tiene su **IP fija** dentro de una red bridge y comparte una carpeta vía **NFS** — `node1` actúa como servidor y los otros dos como clientes.
 
 ```yaml
 services:
@@ -105,29 +170,38 @@ services:
     build: .
     image: mpi-node:latest
     container_name: node1
+    privileged: true
+    environment:
+      NODE_ROLE: server
     networks:
       my-red:
         ipv4_address: 172.20.0.11
-    volumes:
-      - ./shared:/mnt/cluster
 
   node2:
     image: mpi-node:latest
     container_name: node2
+    privileged: true
+    environment:
+      NODE_ROLE: client
+      NFS_SERVER: 172.20.0.11
+    depends_on:
+      - node1
     networks:
       my-red:
         ipv4_address: 172.20.0.12
-    volumes:
-      - ./shared:/mnt/cluster
 
   node3:
     image: mpi-node:latest
     container_name: node3
+    privileged: true
+    environment:
+      NODE_ROLE: client
+      NFS_SERVER: 172.20.0.11
+    depends_on:
+      - node1
     networks:
       my-red:
         ipv4_address: 172.20.0.13
-    volumes:
-      - ./shared:/mnt/cluster
 
 networks:
   my-red:
@@ -139,14 +213,21 @@ networks:
 
 ### Servicios
 
-| Servicio | Imagen            | IP fija         | Notas                                       |
-| -------- | ----------------- | --------------- | ------------------------------------------- |
-| `node1`  | `mpi-node:latest` | `172.20.0.11`   | **`build: .`** → construye la imagen aquí   |
-| `node2`  | `mpi-node:latest` | `172.20.0.12`   | Reutiliza la imagen ya construida           |
-| `node3`  | `mpi-node:latest` | `172.20.0.13`   | Reutiliza la imagen ya construida           |
+| Servicio | Imagen            | IP fija         | Rol NFS  | Notas                                                |
+| -------- | ----------------- | --------------- | -------- | ---------------------------------------------------- |
+| `node1`  | `mpi-node:latest` | `172.20.0.11`   | server   | **`build: .`** → construye la imagen aquí. Head MPI. |
+| `node2`  | `mpi-node:latest` | `172.20.0.12`   | client   | Monta `172.20.0.11:/mnt/cluster` al arrancar.        |
+| `node3`  | `mpi-node:latest` | `172.20.0.13`   | client   | Monta `172.20.0.11:/mnt/cluster` al arrancar.        |
 
 - **`build: .`** solo en `node1` → la imagen `mpi-node:latest` se construye una vez; los otros nodos la reutilizan.
 - **`container_name`** → fija el nombre del contenedor (útil para `docker exec -it node1 bash`).
+- **`privileged: true`** → necesario en los 3:
+  - `node1` necesita permisos del kernel para correr `nfs-kernel-server`.
+  - `node2`/`node3` necesitan poder hacer `mount` dentro del contenedor.
+- **`environment`** → define el rol que leerá `entrypoint.sh`:
+  - `NODE_ROLE` decide si arranca como `server` o `client`.
+  - `NFS_SERVER` solo en clientes; apunta a la IP fija de `node1`.
+- **`depends_on: [node1]`** → garantiza que `node1` arranque primero. El loop de espera del entrypoint cubre el resto (el `depends_on` solo espera al *contenedor*, no al servicio NFS dentro).
 
 ### Red — `my-red`
 
@@ -163,15 +244,28 @@ networks:
 - **`subnet: 172.20.0.0/16`** → rango de IPs disponible.
 - Cada nodo recibe una **IP fija** (`ipv4_address`) para poder referenciarse entre sí (ej. `ssh mpiuser@172.20.0.12`).
 
-### Volumen compartido
+### Almacenamiento compartido vía NFS
 
-```yaml
-volumes:
-  - ./shared:/mnt/cluster
+A diferencia de un bind mount al host, aquí los datos viven **dentro del contenedor `node1`** en `/mnt/cluster`. `node1` exporta esa ruta y los demás nodos la montan por red:
+
+```
+host
+└── (sin carpeta compartida en el host)
+
+node1  ── /mnt/cluster (real, exportado por NFS)
+            ▲
+            │  NFSv4
+            │
+node2  ── /mnt/cluster (montado del server)
+node3  ── /mnt/cluster (montado del server)
 ```
 
-- Monta la carpeta local `./shared` dentro de cada contenedor en `/mnt/cluster`.
-- Los **3 nodos ven el mismo directorio**, lo que permite compartir programas MPI, datasets y resultados sin copiarlos por SSH.
+- Los **3 nodos ven la misma ruta** `/mnt/cluster`, así que `mpirun` puede asumir que el binario y los datasets existen igual en cada uno.
+- Para meter archivos al cluster desde el host, se usan `docker cp` o `scp` contra `node1`:
+  ```bash
+  docker cp matmul.c node1:/mnt/cluster/
+  ```
+- Si tumbas el cluster con `docker compose down`, los datos en `/mnt/cluster` se **pierden** (viven en el filesystem de `node1`, no en un volumen persistente). Para conservarlos, copia antes con `docker cp node1:/mnt/cluster ./backup`.
 
 ### Comandos útiles
 
@@ -182,6 +276,17 @@ docker compose up -d
 # Entrar a un nodo
 docker exec -it node1 bash
 
+# Verificar que el NFS está montado en los clientes
+docker exec node2 mount | grep cluster
+# → 172.20.0.11:/mnt/cluster on /mnt/cluster type nfs4 ...
+
+# Probar la sincronización: escribe en node1, lee desde node3
+docker exec node1 bash -c "echo hola > /mnt/cluster/test.txt"
+docker exec node3 cat /mnt/cluster/test.txt
+
+# Ver los exports activos en el server
+docker exec node1 exportfs -v
+
 # Detener y eliminar todo
 docker compose down
 ```
@@ -190,4 +295,3 @@ docker compose down
 
 Para conceptos generales sobre `ENV`, `RUN`, `useradd` y endurecimiento SSH, ver:
 [`3. Docker/ubuntu-vm/ubuntu-vm.md`](../../3.%20Docker/ubuntu-vm/ubuntu-vm.md)
-# DevOps-02_Ubuntu-Container-Cluster

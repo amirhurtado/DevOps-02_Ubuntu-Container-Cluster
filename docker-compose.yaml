@@ -3,29 +3,39 @@ services:
     build: .
     image: mpi-node:latest
     container_name: node1
-    networks:                   
+    privileged: true
+    environment:
+      NODE_ROLE: server
+    networks:
       my-red:
         ipv4_address: 172.20.0.11
-    volumes:                   
-      - ./shared:/mnt/cluster
+
   node2:
     image: mpi-node:latest
     container_name: node2
+    privileged: true
+    environment:
+      NODE_ROLE: client
+      NFS_SERVER: 172.20.0.11
+    depends_on:
+      - node1
     networks:
       my-red:
         ipv4_address: 172.20.0.12
-    volumes:
-      - ./shared:/mnt/cluster
-    
+
   node3:
     image: mpi-node:latest
     container_name: node3
+    privileged: true
+    environment:
+      NODE_ROLE: client
+      NFS_SERVER: 172.20.0.11
+    depends_on:
+      - node1
     networks:
       my-red:
         ipv4_address: 172.20.0.13
-    volumes:
-      - ./shared:/mnt/cluster
-          
+
 networks:
   my-red:
     driver: bridge

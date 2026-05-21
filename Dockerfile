@@ -13,6 +13,9 @@ RUN apt-get update && apt-get install -y \
     iputils-ping \
     sudo \
     nano \
+    nfs-kernel-server \
+    nfs-common \
+    rpcbind \
     && rm -rf /var/lib/apt/lists/*
 
 RUN mkdir -p /var/run/sshd \
@@ -37,6 +40,9 @@ RUN printf "Host *\n\tStrictHostKeyChecking no\n\tUserKnownHostsFile=/dev/null\n
     && chmod u=rw,go= /home/mpiuser/.ssh/config
 
 USER root
-EXPOSE 22
+EXPOSE 22 2049 111
 
-CMD ["/usr/sbin/sshd", "-D"]
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
