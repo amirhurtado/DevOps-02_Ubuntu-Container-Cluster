@@ -3,11 +3,11 @@ set -e
 
 mkdir -p /mnt/cluster
 chown mpiuser:mpiuser /mnt/cluster
-j
+
 if [ "$NODE_ROLE" = "server" ]; then
     echo "[entrypoint] Iniciando como NFS server"
 
-    echo "/mnt/cluster 172.20.0.0/16(rw,sync,no_subtree_check,no_root_squash)" > /etc/exports
+    echo "/mnt/cluster 172.30.0.0/16(rw,sync,fsid=0,no_subtree_check,no_root_squash)" > /etc/exports
 
     service rpcbind start
     service nfs-kernel-server start
@@ -28,7 +28,7 @@ elif [ "$NODE_ROLE" = "client" ]; then
         sleep 2
     done
 
-    mount -t nfs4 "$NFS_SERVER:/mnt/cluster" /mnt/cluster
+    mount -t nfs4 "$NFS_SERVER:/" /mnt/cluster
     echo "[entrypoint] Montaje NFS hecho:"
     mount | grep cluster
 

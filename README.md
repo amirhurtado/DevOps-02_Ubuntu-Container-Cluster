@@ -119,7 +119,7 @@ ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 Un único script que se comparte entre los 3 nodos. Lo que ejecuta depende de `NODE_ROLE`:
 
 - **`NODE_ROLE=server`** → arranca el servidor NFS (configura `/etc/exports`, levanta `rpcbind` y `nfs-kernel-server`, ejecuta `exportfs -ra`).
-- **`NODE_ROLE=client`** → espera a que el puerto 2049 del `$NFS_SERVER` responda y monta `172.20.0.11:/mnt/cluster` en `/mnt/cluster` vía NFSv4.
+- **`NODE_ROLE=client`** → espera a que el puerto 2049 del `$NFS_SERVER` responda y monta `172.30.0.11:/` en `/mnt/cluster` vía NFSv4 (la raíz NFSv4 es `/mnt/cluster` gracias a `fsid=0`).
 - Al final, **todos** los nodos arrancan `sshd -D` en foreground (para que el contenedor no se cierre).
 
 ```bash
@@ -130,7 +130,7 @@ mkdir -p /mnt/cluster
 chown mpiuser:mpiuser /mnt/cluster
 
 if [ "$NODE_ROLE" = "server" ]; then
-    echo "/mnt/cluster 172.20.0.0/16(rw,sync,no_subtree_check,no_root_squash)" > /etc/exports
+    echo "/mnt/cluster 172.30.0.0/16(rw,sync,fsid=0,no_subtree_check,no_root_squash)" > /etc/exports
     service rpcbind start
     service nfs-kernel-server start
     exportfs -ra
@@ -142,7 +142,7 @@ elif [ "$NODE_ROLE" = "client" ]; then
         fi
         sleep 2
     done
-    mount -t nfs4 "$NFS_SERVER:/mnt/cluster" /mnt/cluster
+    mount -t nfs4 "$NFS_SERVER:/" /mnt/cluster
 fi
 
 exec /usr/sbin/sshd -D
@@ -150,13 +150,14 @@ exec /usr/sbin/sshd -D
 
 ### Opciones de `/etc/exports`
 
-`/mnt/cluster 172.20.0.0/16(rw,sync,no_subtree_check,no_root_squash)`
+`/mnt/cluster 172.30.0.0/16(rw,sync,fsid=0,no_subtree_check,no_root_squash)`
 
 | Opción              | Significado                                                                     |
 | ------------------- | ------------------------------------------------------------------------------- |
-| `172.20.0.0/16`     | Solo clientes de la subred del cluster pueden montar                            |
+| `172.30.0.0/16`     | Solo clientes de la subred del cluster pueden montar                            |
 | `rw`                | Lectura y escritura                                                             |
 | `sync`              | Escrituras confirmadas en disco antes de responder (más lento pero seguro)      |
+| `fsid=0`            | Hace que `/mnt/cluster` sea la **raíz** del pseudo-FS NFSv4 → clientes montan `server:/` |
 | `no_subtree_check`  | Desactiva la verificación de subárbol (mejor rendimiento y robustez)            |
 | `no_root_squash`    | El `root` del cliente se trata como `root` real (necesario para `mpirun` y SSH) |
 
@@ -173,9 +174,11 @@ services:
     privileged: true
     environment:
       NODE_ROLE: server
+    volumes:
+      - nfs-data:/mnt/cluster
     networks:
       my-red:
-        ipv4_address: 172.20.0.11
+        ipv4_address: 172.30.0.11
 
   node2:
     image: mpi-node:latest
@@ -183,12 +186,12 @@ services:
     privileged: true
     environment:
       NODE_ROLE: client
-      NFS_SERVER: 172.20.0.11
+      NFS_SERVER: 172.30.0.11
     depends_on:
       - node1
     networks:
       my-red:
-        ipv4_address: 172.20.0.12
+        ipv4_address: 172.30.0.12
 
   node3:
     image: mpi-node:latest
@@ -196,28 +199,37 @@ services:
     privileged: true
     environment:
       NODE_ROLE: client
-      NFS_SERVER: 172.20.0.11
+      NFS_SERVER: 172.30.0.11
     depends_on:
       - node1
     networks:
       my-red:
-        ipv4_address: 172.20.0.13
+        ipv4_address: 172.30.0.13
+
+volumes:
+  nfs-data:
 
 networks:
   my-red:
     driver: bridge
     ipam:
       config:
-        - subnet: 172.20.0.0/16
+        - subnet: 172.30.0.0/16
 ```
+
+### Volumen `nfs-data`
+
+Named volume Docker montado **solo en `node1`** sobre `/mnt/cluster`. Es el "disco físico" del servidor NFS: aquí viven realmente los archivos. `node2` y `node3` **no** tienen este volumen — acceden al contenido vía `mount -t nfs4` por la red.
+
+Razón técnica: el filesystem `overlay2` (default de los contenedores) no soporta exports NFS porque no implementa file-handles. Un named volume Docker es ext4 en la VM, sí lo soporta. Equivale a que un servidor HPC real tenga sus datos en un disco ext4/xfs local antes de exportarlos por NFS.
 
 ### Servicios
 
 | Servicio | Imagen            | IP fija         | Rol NFS  | Notas                                                |
 | -------- | ----------------- | --------------- | -------- | ---------------------------------------------------- |
-| `node1`  | `mpi-node:latest` | `172.20.0.11`   | server   | **`build: .`** → construye la imagen aquí. Head MPI. |
-| `node2`  | `mpi-node:latest` | `172.20.0.12`   | client   | Monta `172.20.0.11:/mnt/cluster` al arrancar.        |
-| `node3`  | `mpi-node:latest` | `172.20.0.13`   | client   | Monta `172.20.0.11:/mnt/cluster` al arrancar.        |
+| `node1`  | `mpi-node:latest` | `172.30.0.11`   | server   | **`build: .`** → construye la imagen aquí. Head MPI. |
+| `node2`  | `mpi-node:latest` | `172.30.0.12`   | client   | Monta `172.30.0.11:/mnt/cluster` al arrancar.        |
+| `node3`  | `mpi-node:latest` | `172.30.0.13`   | client   | Monta `172.30.0.11:/mnt/cluster` al arrancar.        |
 
 - **`build: .`** solo en `node1` → la imagen `mpi-node:latest` se construye una vez; los otros nodos la reutilizan.
 - **`container_name`** → fija el nombre del contenedor (útil para `docker exec -it node1 bash`).
@@ -237,12 +249,12 @@ networks:
     driver: bridge
     ipam:
       config:
-        - subnet: 172.20.0.0/16
+        - subnet: 172.30.0.0/16
 ```
 
 - **`driver: bridge`** → red interna aislada para los contenedores del proyecto.
-- **`subnet: 172.20.0.0/16`** → rango de IPs disponible.
-- Cada nodo recibe una **IP fija** (`ipv4_address`) para poder referenciarse entre sí (ej. `ssh mpiuser@172.20.0.12`).
+- **`subnet: 172.30.0.0/16`** → rango de IPs disponible.
+- Cada nodo recibe una **IP fija** (`ipv4_address`) para poder referenciarse entre sí (ej. `ssh mpiuser@172.30.0.12`).
 
 ### Almacenamiento compartido vía NFS
 
@@ -278,7 +290,7 @@ docker exec -it node1 bash
 
 # Verificar que el NFS está montado en los clientes
 docker exec node2 mount | grep cluster
-# → 172.20.0.11:/mnt/cluster on /mnt/cluster type nfs4 ...
+# → 172.30.0.11:/mnt/cluster on /mnt/cluster type nfs4 ...
 
 # Probar la sincronización: escribe en node1, lee desde node3
 docker exec node1 bash -c "echo hola > /mnt/cluster/test.txt"

@@ -6,9 +6,11 @@ services:
     privileged: true
     environment:
       NODE_ROLE: server
+    volumes:
+      - nfs-data:/mnt/cluster
     networks:
       my-red:
-        ipv4_address: 172.20.0.11
+        ipv4_address: 172.30.0.11
 
   node2:
     image: mpi-node:latest
@@ -16,12 +18,12 @@ services:
     privileged: true
     environment:
       NODE_ROLE: client
-      NFS_SERVER: 172.20.0.11
+      NFS_SERVER: 172.30.0.11
     depends_on:
       - node1
     networks:
       my-red:
-        ipv4_address: 172.20.0.12
+        ipv4_address: 172.30.0.12
 
   node3:
     image: mpi-node:latest
@@ -29,16 +31,19 @@ services:
     privileged: true
     environment:
       NODE_ROLE: client
-      NFS_SERVER: 172.20.0.11
+      NFS_SERVER: 172.30.0.11
     depends_on:
       - node1
     networks:
       my-red:
-        ipv4_address: 172.20.0.13
+        ipv4_address: 172.30.0.13
+
+volumes:
+  nfs-data:
 
 networks:
   my-red:
     driver: bridge
     ipam:
       config:
-        - subnet: 172.20.0.0/16
+        - subnet: 172.30.0.0/16
