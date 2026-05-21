@@ -3,11 +3,13 @@
 #include <string.h>
 #include <mpi.h>
 
+#define DIR_MATRICES "/mnt/cluster/matrices"
+
 int obtenerTamano(int argc, char *argv[], int rank);
-int* reservarMatriz(int elementos);
-void inicializarMatrices(int *A, int *B, int n);
-void multiplicarParcial(const int *Alocal, const int *B, int *Clocal, int filas, int n);
+int* reservarMatriz(long elementos);
 void calcularReparto(int n, int size, int *sendcounts, int *displs);
+void cargarFranja(const char *path, int *buffer, long offset_elementos, long n_elementos);
+void multiplicarParcial(const int *Alocal, const int *B, int *Clocal, int filas, int n);
 
 int main(int argc, char *argv[]) {
     MPI_Init(&argc, &argv);
@@ -24,26 +26,25 @@ int main(int argc, char *argv[]) {
     calcularReparto(n, size, sendcounts, displs);
 
     int filas_locales = sendcounts[rank] / n;
+    long offset_elementos = (long)displs[rank];
 
-    int *A = NULL, *C = NULL;
-    int *B      = reservarMatriz(n * n);
-    int *Alocal = reservarMatriz(filas_locales * n);
-    int *Clocal = reservarMatriz(filas_locales * n);
-    memset(Clocal, 0, filas_locales * n * sizeof(int));
+    int *B      = reservarMatriz((long)n * n);
+    int *Alocal = reservarMatriz((long)filas_locales * n);
+    int *Clocal = reservarMatriz((long)filas_locales * n);
+    memset(Clocal, 0, (size_t)filas_locales * n * sizeof(int));
 
-    if (rank == 0) {
-        A = reservarMatriz(n * n);
-        C = reservarMatriz(n * n);
-        inicializarMatrices(A, B, n);
-    }
+    int *C = NULL;
+    if (rank == 0) C = reservarMatriz((long)n * n);
+
+    char rutaA[256], rutaB[256];
+    snprintf(rutaA, sizeof(rutaA), "%s/A_%d.bin", DIR_MATRICES, n);
+    snprintf(rutaB, sizeof(rutaB), "%s/B_%d.bin", DIR_MATRICES, n);
+
+    cargarFranja(rutaA, Alocal, offset_elementos, (long)filas_locales * n);
+    cargarFranja(rutaB, B, 0, (long)n * n);
 
     MPI_Barrier(MPI_COMM_WORLD);
     double inicio = MPI_Wtime();
-
-    MPI_Bcast(B, n * n, MPI_INT, 0, MPI_COMM_WORLD);
-    MPI_Scatterv(A, sendcounts, displs, MPI_INT,
-                 Alocal, filas_locales * n, MPI_INT,
-                 0, MPI_COMM_WORLD);
 
     multiplicarParcial(Alocal, B, Clocal, filas_locales, n);
 
@@ -56,7 +57,6 @@ int main(int argc, char *argv[]) {
 
     if (rank == 0) {
         printf("%d %f\n", n, fin - inicio);
-        free(A);
         free(C);
     }
 
@@ -83,32 +83,13 @@ int obtenerTamano(int argc, char *argv[], int rank) {
     return n;
 }
 
-int* reservarMatriz(int elementos) {
+int* reservarMatriz(long elementos) {
     int *m = (int *)malloc((size_t)elementos * sizeof(int));
     if (!m) {
-        fprintf(stderr, "malloc fallo (%d ints)\n", elementos);
+        fprintf(stderr, "malloc fallo (%ld ints)\n", elementos);
         MPI_Abort(MPI_COMM_WORLD, 1);
     }
     return m;
-}
-
-void inicializarMatrices(int *A, int *B, int n) {
-    srand(42);
-    for (int i = 0; i < n * n; i++) {
-        A[i] = rand() % 10;
-        B[i] = rand() % 10;
-    }
-}
-
-void multiplicarParcial(const int *Alocal, const int *B, int *Clocal, int filas, int n) {
-    for (int i = 0; i < filas; i++) {
-        for (int k = 0; k < n; k++) {
-            int aik = Alocal[i * n + k];
-            for (int j = 0; j < n; j++) {
-                Clocal[i * n + j] += aik * B[k * n + j];
-            }
-        }
-    }
 }
 
 void calcularReparto(int n, int size, int *sendcounts, int *displs) {
@@ -120,5 +101,36 @@ void calcularReparto(int n, int size, int *sendcounts, int *displs) {
         sendcounts[i] = filas_i * n;
         displs[i] = offset;
         offset += filas_i * n;
+    }
+}
+
+void cargarFranja(const char *path, int *buffer, long offset_elementos, long n_elementos) {
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        fprintf(stderr, "No se pudo abrir %s\n", path);
+        MPI_Abort(MPI_COMM_WORLD, 1);
+    }
+    if (offset_elementos > 0) {
+        if (fseek(f, offset_elementos * (long)sizeof(int), SEEK_SET) != 0) {
+            fprintf(stderr, "fseek fallo en %s\n", path);
+            MPI_Abort(MPI_COMM_WORLD, 1);
+        }
+    }
+    size_t leidos = fread(buffer, sizeof(int), (size_t)n_elementos, f);
+    if ((long)leidos != n_elementos) {
+        fprintf(stderr, "fread incompleto en %s: leidos=%zu esperados=%ld\n", path, leidos, n_elementos);
+        MPI_Abort(MPI_COMM_WORLD, 1);
+    }
+    fclose(f);
+}
+
+void multiplicarParcial(const int *Alocal, const int *B, int *Clocal, int filas, int n) {
+    for (int i = 0; i < filas; i++) {
+        for (int k = 0; k < n; k++) {
+            int aik = Alocal[i * n + k];
+            for (int j = 0; j < n; j++) {
+                Clocal[i * n + j] += aik * B[k * n + j];
+            }
+        }
     }
 }

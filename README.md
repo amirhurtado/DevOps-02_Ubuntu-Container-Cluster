@@ -337,22 +337,28 @@ docker compose down
 
 ### Archivos MPI (carpeta `mpi/`)
 
-| Archivo         | Qué hace                                                                                                                                       |
-| --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `mpi/mul.c`     | Multiplicación de matrices distribuida con MPI (`MPI_Bcast` + `MPI_Scatterv` + `MPI_Gatherv`). Recibe `n` y devuelve `n tiempo`.                |
-| `mpi/script.sh` | Ejecuta `mpirun --map-by node -np 3` sobre 9 tamaños, 10 repeticiones cada uno, y guarda los tiempos en `times2.txt`.                          |
-| `mpi/hostfile`  | Lista de nodos con sus slots para `mpirun` (`node1 slots=4`, `node2 slots=4`, `node3 slots=4`).                                                |
+| Archivo         | Qué hace                                                                                                                                                |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `mpi/mul.c`     | Multiplicación de matrices distribuida con MPI. Cada rank lee **su slice** de `A` y `B` desde disco; solo se mide cómputo + `MPI_Gatherv`.              |
+| `mpi/gen.c`     | Generador de matrices. Escribe `A_<n>.bin` y `B_<n>.bin` (binarios `int`) con `srand(42 + n)` (semilla fija → reproducible).                            |
+| `mpi/script.sh` | Ejecuta `mpirun --map-by node -np 3` sobre 9 tamaños, 10 repeticiones cada uno, y guarda los tiempos en `times2.txt`.                                   |
+| `mpi/hostfile`  | Lista de nodos con sus slots para `mpirun` (`node1 slots=4`, `node2 slots=4`, `node3 slots=4`).                                                         |
 
-El `Dockerfile` copia `mpi/` a `/opt/mpi/` dentro de la imagen y `entrypoint.sh` (solo en `node1`) los pone en `/mnt/cluster/` compilando `mul.c` con `mpicc -Ofast`. Como `/mnt/cluster` es NFS, los 3 nodos ven el binario sin copiar nada.
+El `Dockerfile` copia `mpi/` a `/opt/mpi/` dentro de la imagen. `entrypoint.sh` (solo en `node1`) compila ambos binarios (`mpicc -Ofast` para `mul`, `gcc -Ofast` para `gen`), y **genera las 9 matrices** (`n` ∈ {1000, 1259, 1586, 1996, 2513, 3163, 3981, 5010, 6310}) en `/mnt/cluster/matrices/`. Como esta carpeta vive en el volumen `nfs-data`, las matrices **se generan una sola vez** y se reutilizan en arranques posteriores.
+
+### Por qué matrices pre-generadas
+
+Generar las matrices en cada corrida (con `rand()` sobre rank 0) y luego difundirlas con `MPI_Bcast` introduce dos costes que distorsionan la medición: tiempo de CPU para `rand()` y tráfico de red para el broadcast. Al tener las matrices en disco compartido vía NFS, **cada rank lee solo su porción** (`fseek` + `fread`) y la medición refleja únicamente el cómputo paralelo.
 
 ### Cómo distribuye el trabajo MPI
 
-1. **Rank 0** (en `node1`) genera `A` y `B` con `srand(42)` (semilla fija → reproducible).
-2. `MPI_Bcast(B)` → los 3 ranks tienen `B` completa.
-3. `MPI_Scatterv(A)` → cada rank recibe sus filas de `A` (Scatterv permite que `n` no sea divisible por número de procesos).
-4. Cada rank calcula sus filas de `C = A_local * B`.
-5. `MPI_Gatherv(C)` → rank 0 recolecta `C` completa.
-6. `MPI_Wtime()` mide tiempo total alrededor de `Bcast + Scatterv + cómputo + Gatherv`.
+1. `mpirun --map-by node -np 3` lanza un proceso (`rank`) en cada nodo.
+2. Cada rank calcula sus `sendcounts`/`displs` y abre `A_<n>.bin` haciendo `fseek` a su porción → lee solo sus filas.
+3. Cada rank lee `B_<n>.bin` completa (la necesita entera para multiplicar).
+4. **`MPI_Barrier` + `MPI_Wtime()`** → empieza la medición.
+5. Cada rank calcula sus filas de `C = A_local * B`.
+6. `MPI_Gatherv(C)` → rank 0 recolecta `C` completa.
+7. **`MPI_Barrier` + `MPI_Wtime()`** → fin de medición. Rank 0 imprime `n tiempo`.
 
 Variables del script (override con env vars):
 
