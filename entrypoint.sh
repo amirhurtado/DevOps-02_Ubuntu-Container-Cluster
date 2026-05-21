@@ -16,6 +16,15 @@ if [ "$NODE_ROLE" = "server" ]; then
     echo "[entrypoint] Exports activos:"
     exportfs -v
 
+    echo "[entrypoint] Copiando fuentes y compilando con gcc -Ofast"
+    cp /opt/mpi/mul.c /mnt/cluster/mul.c
+    cp /opt/mpi/script.sh /mnt/cluster/script.sh
+    chmod +x /mnt/cluster/script.sh
+    gcc -Ofast /mnt/cluster/mul.c -o /mnt/cluster/mul
+    chown -R mpiuser:mpiuser /mnt/cluster
+    echo "[entrypoint] Contenido de /mnt/cluster:"
+    ls -la /mnt/cluster
+
 elif [ "$NODE_ROLE" = "client" ]; then
     echo "[entrypoint] Iniciando como NFS client (server=$NFS_SERVER)"
 

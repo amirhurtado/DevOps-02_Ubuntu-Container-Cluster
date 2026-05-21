@@ -307,11 +307,18 @@ Layout del filesystem dentro de cada nodo:
 ### Comandos útiles
 
 ```bash
-# Construir y levantar los 3 nodos
-docker compose up -d
+# Construir y levantar los 3 nodos (la imagen ya trae mul.c y script.sh
+# desde la carpeta mpi/; al arrancar node1 compila con gcc -Ofast y los
+# deja en /mnt/cluster, visibles por NFS en los 3 nodos)
+docker compose up -d --build
 
-# Entrar a un nodo
-docker exec -it node1 bash
+# Entrar a node1 como mpiuser
+docker exec -it -u mpiuser node1 bash
+
+# Una vez dentro, ejecutar el script de pruebas
+cd /mnt/cluster
+./script.sh
+cat times2.txt        # tiempos generados
 
 # Verificar que el NFS está montado en los clientes
 docker exec node2 mount | grep cluster
@@ -327,6 +334,15 @@ docker exec node1 exportfs -v
 # Detener y eliminar todo
 docker compose down
 ```
+
+### Archivos MPI (carpeta `mpi/`)
+
+| Archivo         | Qué hace                                                                                          |
+| --------------- | ------------------------------------------------------------------------------------------------- |
+| `mpi/mul.c`     | Programa de multiplicación de matrices. Recibe el tamaño `n` y devuelve `n tiempo`.               |
+| `mpi/script.sh` | Ejecuta `./mul` 10 veces sobre 9 tamaños distintos y guarda los tiempos en `times2.txt`.          |
+
+El `Dockerfile` copia `mpi/` a `/opt/mpi/` dentro de la imagen y `entrypoint.sh` (solo en `node1`) los pone en `/mnt/cluster/` compilando `mul.c` con `gcc -Ofast`. Como `/mnt/cluster` es NFS, los 3 nodos ven el binario sin copiar nada.
 
 ## Referencia general
 

@@ -42,6 +42,8 @@ RUN printf "Host *\n\tStrictHostKeyChecking no\n\tUserKnownHostsFile=/dev/null\n
 USER root
 EXPOSE 22 2049 111
 
+COPY --chown=mpiuser:mpiuser mpi/ /opt/mpi/
+
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
