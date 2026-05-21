@@ -367,6 +367,53 @@ NP=6 ./script.sh          # 6 procesos (2 por nodo)
 NP=3 OUT=/mnt/cluster/run1.txt ./script.sh
 ```
 
+## MPI explicado fácil
+
+### Cómo `mpirun` encuentra los otros nodos
+
+1. **`hostfile`** dice los nombres: `node1`, `node2`, `node3`.
+2. **Docker Compose** crea una DNS interna en la red `my-red` → esos nombres resuelven a `172.30.0.11`, `.12`, `.13`.
+3. **SSH con llaves** (`~/.ssh/hpckey`) permite a `mpirun` arrancar procesos en los otros nodos sin contraseña.
+4. Una vez arrancados, los procesos hablan entre sí por **TCP** dentro de la red Docker.
+
+Resumen: `hostfile` (nombres) + Docker DNS (resolver) + SSH (autenticación) = `mpirun` puede ejecutar código en los 3 contenedores.
+
+### Las 6 funciones MPI que usa el código
+
+| Función | Qué hace |
+| ------- | -------- |
+| `MPI_Init(&argc, &argv)` | Arranca MPI. **Siempre la primera** llamada. |
+| `MPI_Comm_rank(comm, &rank)` | Devuelve **mi número** dentro del grupo (0, 1 o 2). |
+| `MPI_Comm_size(comm, &size)` | Devuelve **cuántos procesos** hay en total (3). |
+| `MPI_Barrier(comm)` | Espera a que **todos** lleguen a este punto antes de seguir. Útil antes y después de cronometrar. |
+| `MPI_Wtime()` | Devuelve un tiempo en segundos. Restando dos llamadas se mide cuánto tardó algo. |
+| `MPI_Gatherv(...)` | **Junta** trozos de los demás ranks en un solo arreglo del rank 0. |
+| `MPI_Finalize()` | Cierra MPI. **Siempre la última** llamada. |
+
+### Flujo del programa en una imagen
+
+```
+mpirun --map-by node -np 3 /mnt/cluster/mul 1000
+        │
+        ├─→ node1 (rank 0): lee filas 0-333 de A_1000.bin
+        ├─→ node2 (rank 1): lee filas 334-666 de A_1000.bin
+        └─→ node3 (rank 2): lee filas 667-999 de A_1000.bin
+                │
+        cada uno carga B_1000.bin entera
+                │
+        MPI_Barrier ── todos esperan ──
+                │
+        cada uno multiplica su trozo en paralelo
+                │
+        MPI_Gatherv ── envían sus trozos a rank 0 ──
+                │
+        MPI_Barrier ── todos esperan ──
+                │
+        rank 0 imprime "1000 0.034"
+```
+
+**La idea clave:** el mismo binario corre 3 veces, pero como `rank` es distinto en cada uno, cada copia procesa una parte diferente del problema.
+
 ## Referencia general
 
 Para conceptos generales sobre `ENV`, `RUN`, `useradd` y endurecimiento SSH, ver:
